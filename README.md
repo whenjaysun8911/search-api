@@ -26,13 +26,23 @@ search-api/
 uv sync
 ```
 
-### 运行开发服务器
+### 运行服务器
+
+**推荐方式（支持外网访问）：**
 
 ```bash
-uv run uvicorn src.app.main:app --reload --host 0.0.0.0 --port 8000
+uv run run.py
 ```
 
-### 访问 API 文档
+或者直接使用 uvicorn 命令：
 
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+```bash
+uv run uvicorn src.app.main:app --host 0.0.0.0 --port 56808
+```
+
+> 注意：部署在服务器上时，请确保：
+> 1. 服务器防火墙已开放 56808 端口
+> 2. 云服务器的安全组已允许 56808 端口的入站流量
+
+### 访问 API 文档
+（注意：为了安全，Swagger UI 默认已禁用，如需开启请修改 `src/app/main.py`）
