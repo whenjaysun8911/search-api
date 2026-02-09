@@ -8,6 +8,7 @@ import logging
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import wikipediaapi
@@ -208,22 +209,37 @@ class SearchService:
             "sources": {},
         }
 
-        # 根据配置的 sources 执行搜索
+        # 根据配置的 sources 并发执行搜索
+        # 定义搜索任务映射，key 为搜索源名称，value 为搜索函数及其参数
+        search_tasks = {}
         if "brave" in sources:
-            output["sources"]["brave"] = cls.search_brave(query, count, freshness)
-
+            search_tasks["brave"] = (cls.search_brave, (query, count, freshness))
         if "tavily" in sources:
-            output["sources"]["tavily"] = cls.search_tavily(query, count)
-
+            search_tasks["tavily"] = (cls.search_tavily, (query, count))
         if "serper" in sources:
-            output["sources"]["serper"] = cls.search_serper(query, count)
-
+            search_tasks["serper"] = (cls.search_serper, (query, count))
         if "duckduckgo" in sources:
-            output["sources"]["duckduckgo"] = cls.search_duckduckgo(query, count)
-
+            search_tasks["duckduckgo"] = (cls.search_duckduckgo, (query, count))
         if "wikipedia" in sources:
-            wiki_result = cls.get_wikipedia_summary(query)
-            if wiki_result:
-                output["sources"]["wikipedia"] = wiki_result
+            search_tasks["wikipedia"] = (cls.get_wikipedia_summary, (query,))
+
+        # 使用线程池并发执行搜索任务
+        with ThreadPoolExecutor(max_workers=len(search_tasks) or 1) as executor:
+            # 提交所有任务并记录 future 与搜索源的映射
+            future_to_source = {
+                executor.submit(func, *args): source_name
+                for source_name, (func, args) in search_tasks.items()
+            }
+
+            # 收集完成的任务结果
+            for future in as_completed(future_to_source):
+                source_name = future_to_source[future]
+                try:
+                    result = future.result()
+                    # Wikipedia 返回 None 时不添加到结果中
+                    if result is not None:
+                        output["sources"][source_name] = result
+                except Exception as e:
+                    logger.error(f"{source_name} 搜索任务异常: {e}")
 
         return output
