@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # API 配置
     api_v1_prefix: str = "/api/v1"
 
+    # API 访问 Token
+    api_token: str = "sk-password"
+
     # 搜索引擎 API Keys
     brave_api_key: str = ""
     tavily_api_key: str = ""
