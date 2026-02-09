@@ -10,7 +10,7 @@ class SearchRequest(BaseModel):
 
     query: str = Field(..., description="搜索关键词")
     count: int = Field(default=5, ge=1, le=20, description="每个搜索引擎返回的结果数量")
-    freshness: str = Field(default="pd", description="内容新鲜度过滤(仅Brave支持): pd=过去24小时, pw=过去一周, pm=过去一月")
+    freshness: str = Field(default="", description="内容新鲜度过滤(仅Brave支持): pd=过去24小时, pw=过去一周, pm=过去一月, 空=不限制")
     sources: list[str] | None = Field(
         default=None,
         description="指定使用的搜索源，可选: brave, tavily, serper, duckduckgo, wikipedia。为空则使用全部",

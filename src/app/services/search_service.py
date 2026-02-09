@@ -28,20 +28,22 @@ class SearchService:
     AVAILABLE_SOURCES = ["brave", "tavily", "serper", "duckduckgo", "wikipedia"]
 
     @staticmethod
-    def search_brave(query: str, count: int = 5, freshness: str = "pd") -> list[SearchResultItem]:
+    def search_brave(query: str, count: int = 5, freshness: str = "") -> list[SearchResultItem]:
         """
         使用 Brave Search API 搜索
         
         Args:
             query: 搜索关键词
             count: 返回结果数量
-            freshness: 新鲜度过滤 (pd=24小时, pw=一周, pm=一月)
+            freshness: 新鲜度过滤 (pd=24小时, pw=一周, pm=一月, 空=不限制)
         """
         if not settings.brave_api_key:
             logger.warning("Brave API key 未配置")
             return []
 
-        url = f"https://api.search.brave.com/res/v1/web/search?q={urllib.parse.quote(query)}&count={count}&freshness={freshness}"
+        # 构建请求 URL，仅在 freshness 有值时添加该参数
+        base_url = f"https://api.search.brave.com/res/v1/web/search?q={urllib.parse.quote(query)}&count={count}"
+        url = f"{base_url}&freshness={freshness}" if freshness else base_url
         headers = {"Accept": "application/json", "X-Subscription-Token": settings.brave_api_key}
 
         try:
@@ -50,6 +52,7 @@ class SearchService:
                 if response.status == 200:
                     data = json.loads(response.read().decode())
                     results = data.get("web", {}).get("results", [])
+                    logger.debug(f"Brave Search 返回 {len(results)} 条结果")
                     return [
                         SearchResultItem(
                             title=r.get("title"),
@@ -59,6 +62,10 @@ class SearchService:
                         )
                         for r in results
                     ]
+                else:
+                    logger.warning(f"Brave Search 响应状态码: {response.status}")
+        except urllib.error.HTTPError as e:
+            logger.error(f"Brave Search HTTP 错误: {e.code} - {e.reason}")
         except Exception as e:
             logger.error(f"Brave Search 失败: {e}")
         return []
@@ -181,7 +188,7 @@ class SearchService:
         cls,
         query: str,
         count: int = 5,
-        freshness: str = "pd",
+        freshness: str = "",
         sources: list[str] | None = None,
     ) -> dict:
         """

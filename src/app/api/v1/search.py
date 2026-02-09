@@ -36,7 +36,7 @@ async def multi_search(request: SearchRequest):
 async def search_get(
     query: str,
     count: int = 5,
-    freshness: str = "pd",
+    freshness: str = "",
     sources: str | None = None,
 ):
     """
@@ -45,7 +45,7 @@ async def search_get(
     Args:
         query: 搜索关键词
         count: 每个搜索引擎返回的结果数量（1-20）
-        freshness: 内容新鲜度过滤(仅Brave): pd=24小时, pw=一周, pm=一月
+        freshness: 内容新鲜度过滤(仅Brave): pd=24小时, pw=一周, pm=一月, 空=不限制
         sources: 逗号分隔的搜索源列表，如 "brave,tavily,duckduckgo"
     """
     # 处理 sources 参数
