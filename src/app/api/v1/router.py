@@ -5,10 +5,11 @@ V1 API 路由聚合
 
 from fastapi import APIRouter
 
-from src.app.api.v1 import hello
+from src.app.api.v1 import hello, search
 
 # 创建 v1 主路由
 api_router = APIRouter()
 
 # 注册各模块路由
 api_router.include_router(hello.router)
+api_router.include_router(search.router)

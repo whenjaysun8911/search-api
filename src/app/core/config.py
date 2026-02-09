@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # API 配置
     api_v1_prefix: str = "/api/v1"
 
+    # 搜索引擎 API Keys
+    brave_api_key: str = ""
+    tavily_api_key: str = ""
+    serper_api_key: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
