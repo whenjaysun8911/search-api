@@ -22,6 +22,7 @@ async def multi_search(request: SearchRequest):
     - **serper**: Google 搜索结果（需配置 SERPER_API_KEY）
     - **duckduckgo**: DuckDuckGo 搜索（无需 API key）
     - **wikipedia**: Wikipedia 摘要（无需 API key）
+    - **searxng**: SearXNG 公共实例聚合搜索（无需 API key）
     """
     result = SearchService.multi_search(
         query=request.query,

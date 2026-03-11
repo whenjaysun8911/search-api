@@ -13,7 +13,7 @@ class SearchRequest(BaseModel):
     freshness: str = Field(default="", description="内容新鲜度过滤(仅Brave支持): pd=过去24小时, pw=过去一周, pm=过去一月, 空=不限制")
     sources: list[str] | None = Field(
         default=None,
-        description="指定使用的搜索源，可选: brave, tavily, serper, duckduckgo, wikipedia。为空则使用全部",
+        description="指定使用的搜索源，可选: brave, tavily, serper, duckduckgo, wikipedia, searxng。为空则使用全部",
     )
 
 
