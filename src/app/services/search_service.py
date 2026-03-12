@@ -12,6 +12,10 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
+import urllib3
+
+# 禁用 verify=False 时的 InsecureRequestWarning 警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import wikipediaapi
 from ddgs import DDGS
 from tavily import TavilyClient
@@ -392,7 +396,7 @@ class SearchService:
                     data = resp.json()
                     results = data.get("results", [])
                     if results:
-                        logger.info(f"SearXNG 实例 {instance_url} JSON 搜索成功 ({len(results)} 条结果)")
+                        logger.warning(f"SearXNG 实例 {instance_url} JSON 搜索成功 ({len(results)} 条结果)")
                         return [
                             SearchResultItem(
                                 title=r.get("title"),
@@ -403,17 +407,17 @@ class SearchService:
                             for r in results[:count]
                         ]
                 except (ValueError, KeyError):
-                    logger.debug(f"SearXNG 实例 {instance_url} JSON 解析失败，尝试 HTML")
+                    logger.warning(f"SearXNG 实例 {instance_url} JSON 解析失败，尝试 HTML")
             elif resp.status_code in (429, 403):
-                logger.info(f"SearXNG 实例 {instance_url} JSON 被限速: {resp.status_code}")
+                logger.warning(f"SearXNG 实例 {instance_url} JSON 被限速: {resp.status_code}")
                 raise _RateLimitError(instance_url)
         except _RateLimitError:
             raise
         except requests.exceptions.Timeout:
-            logger.info(f"SearXNG 实例 {instance_url} JSON 请求超时")
+            logger.warning(f"SearXNG 实例 {instance_url} JSON 请求超时")
             # 不直接失败，继续尝试 HTML（部分实例禁用 JSON 但 HTML 可用）
         except requests.exceptions.RequestException as e:
-            logger.debug(f"SearXNG 实例 {instance_url} JSON 请求失败: {e}")
+            logger.warning(f"SearXNG 实例 {instance_url} JSON 请求失败: {e}")
 
         # 情况 B: HTML 回退
         html_url = f"{base_url}/search?q={urllib.parse.quote(query)}&categories=general"
@@ -423,21 +427,21 @@ class SearchService:
             if resp.status_code == 200:
                 results = cls._parse_searxng_html(resp.text)
                 if results:
-                    logger.info(f"SearXNG 实例 {instance_url} HTML 搜索成功 ({len(results)} 条结果)")
+                    logger.warning(f"SearXNG 实例 {instance_url} HTML 搜索成功 ({len(results)} 条结果)")
                     return results[:count]
                 else:
-                    logger.debug(f"SearXNG 实例 {instance_url} HTML 返回空结果")
+                    logger.warning(f"SearXNG 实例 {instance_url} HTML 返回空结果")
             elif resp.status_code in (429, 403):
-                logger.info(f"SearXNG 实例 {instance_url} HTML 被限速: {resp.status_code}")
+                logger.warning(f"SearXNG 实例 {instance_url} HTML 被限速: {resp.status_code}")
                 raise _RateLimitError(instance_url)
             else:
-                logger.debug(f"SearXNG 实例 {instance_url} HTML 响应异常: {resp.status_code}")
+                logger.warning(f"SearXNG 实例 {instance_url} HTML 响应异常: {resp.status_code}")
         except _RateLimitError:
             raise
         except requests.exceptions.Timeout:
-            logger.info(f"SearXNG 实例 {instance_url} HTML 请求超时")
+            logger.warning(f"SearXNG 实例 {instance_url} HTML 请求超时")
         except requests.exceptions.RequestException as e:
-            logger.info(f"SearXNG 实例 {instance_url} HTML 请求失败: {e}")
+            logger.warning(f"SearXNG 实例 {instance_url} HTML 请求失败: {e}")
 
         # JSON + HTML 都未成功
         raise _InstanceFailedError(instance_url)
