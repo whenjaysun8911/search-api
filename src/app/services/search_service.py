@@ -436,16 +436,25 @@ class SearchService:
         """
         同步尝试单个 SearXNG 实例（JSON -> HTML 回退）
         
+        使用 POST 方式提交搜索（SearXNG 表单默认使用 POST，
+        很多实例 GET 请求会直接返回首页而非搜索结果）
+        
         返回结果列表（成功）或抛出异常：
         - _RateLimitError: 被限速 (429/403)
         - _InstanceFailedError: 实例不可用（含超时、连接失败等）
         """
         base_url = instance_url.rstrip("/")
+        search_url = f"{base_url}/search"
 
-        # 情况 A: 优先尝试 JSON API
-        json_url = f"{base_url}/search?q={urllib.parse.quote(query)}&format=json"
+        # 情况 A: 优先尝试 JSON API（POST + format=json）
         try:
-            resp = requests.get(json_url, headers=cls._SEARXNG_HEADERS, timeout=8, verify=False)
+            resp = requests.post(
+                search_url,
+                data={"q": query, "categories": "general", "format": "json"},
+                headers=cls._SEARXNG_HEADERS,
+                timeout=8,
+                verify=False,
+            )
             if resp.status_code == 200:
                 try:
                     data = resp.json()
@@ -474,11 +483,16 @@ class SearchService:
         except requests.exceptions.RequestException as e:
             logger.warning(f"SearXNG 实例 {instance_url} JSON 请求失败: {e}")
 
-        # 情况 B: HTML 回退
-        html_url = f"{base_url}/search?q={urllib.parse.quote(query)}&categories=general"
+        # 情况 B: HTML 回退（POST 不带 format 参数）
         try:
             html_headers = {**cls._SEARXNG_HEADERS, "Referer": f"{base_url}/"}
-            resp = requests.get(html_url, headers=html_headers, timeout=8, verify=False)
+            resp = requests.post(
+                search_url,
+                data={"q": query, "categories": "general"},
+                headers=html_headers,
+                timeout=8,
+                verify=False,
+            )
             if resp.status_code == 200:
                 results = cls._parse_searxng_html(resp.text)
                 if results:
