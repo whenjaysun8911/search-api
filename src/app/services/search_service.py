@@ -439,11 +439,7 @@ class SearchService:
         关键设计：
         - 每次调用创建独立的 asyncio 事件循环和 rnet.Client（避免跨循环复用问题）
         - rnet 模拟 Chrome 的 TLS 指纹（JA3/JA4），绕过 bot 检测
-        - Python requests 库因 TLS 指纹被识别为机器人，所有实例返回首页
-        
-        返回结果列表（成功）或抛出异常：
-        - _RateLimitError: 被限速 (429/403)
-        - _InstanceFailedError: 实例不可用（含超时、连接失败等）
+        - 使用 POST 提交搜索表单（form=...），避免 GET 请求被实例重定向 (302) 或返回首页
         """
         import asyncio
         from rnet import Client, Impersonate
@@ -452,12 +448,15 @@ class SearchService:
             # 每次调用创建独立的 Client，绑定当前事件循环
             client = Client(impersonate=Impersonate.Chrome136, verify=False, timeout=8)
             base_url = instance_url.rstrip("/")
+            search_url = f"{base_url}/search"
 
-            # 情况 A: 优先尝试 JSON API（GET + format=json）
-            json_url = f"{base_url}/search?q={urllib.parse.quote(query)}&format=json&categories=general"
+            # 情况 A: 优先尝试 JSON API（POST + format=json）
             try:
-                response = await client.get(url=json_url)
+                # rnet 需要 form 为 list of tuples 才能正确发送 x-www-form-urlencoded
+                json_payload = [("q", query), ("categories", "general"), ("format", "json")]
+                response = await client.post(url=search_url, form=json_payload)
                 status = response.status_code.as_int()
+                
                 if status == 200:
                     try:
                         data = await response.json()
@@ -483,11 +482,12 @@ class SearchService:
             except Exception as e:
                 logger.warning(f"SearXNG 实例 {instance_url} JSON 请求异常: {e}")
 
-            # 情况 B: HTML 搜索（GET 不带 format 参数）
-            html_url = f"{base_url}/search?q={urllib.parse.quote(query)}&categories=general"
+            # 情况 B: HTML 搜索（POST 不带 format 参数）
             try:
-                response = await client.get(url=html_url)
+                html_payload = [("q", query), ("categories", "general")]
+                response = await client.post(url=search_url, form=html_payload)
                 status = response.status_code.as_int()
+                
                 if status == 200:
                     html_content = await response.text()
                     results = cls._parse_searxng_html(html_content)
