@@ -330,35 +330,75 @@ class SearchService:
             return []
 
     @staticmethod
-    def get_wikipedia_summary(query: str) -> WikipediaResult | None:
+    def _wikipedia_search_titles(query: str, lang: str = "en", limit: int = 3) -> list[str]:
+        """
+        使用 Wikipedia OpenSearch API 根据关键词搜索匹配的页面标题列表
+        
+        Args:
+            query: 搜索关键词
+            lang: 语言代码，如 "zh" 或 "en"
+            limit: 返回的最大标题数量
+        
+        Returns:
+            匹配的页面标题列表，未找到则返回空列表
+        """
+        try:
+            search_url = (
+                f"https://{lang}.wikipedia.org/w/api.php"
+                f"?action=opensearch&search={urllib.parse.quote(query)}"
+                f"&limit={limit}&namespace=0&format=json"
+            )
+            req = urllib.request.Request(
+                search_url,
+                headers={"User-Agent": "SearchAPI/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    # OpenSearch 返回格式: [query, [titles], [descriptions], [urls]]
+                    data = json.loads(response.read().decode())
+                    if len(data) >= 2 and data[1]:
+                        return data[1]
+        except Exception as e:
+            logger.debug(f"Wikipedia OpenSearch ({lang}) 搜索失败: {e}")
+        return []
+
+    @classmethod
+    def get_wikipedia_summary(cls, query: str) -> WikipediaResult | None:
         """
         获取 Wikipedia 摘要信息
+        先通过 OpenSearch API 搜索匹配的页面标题，再获取摘要
         优先中文，回退英文
         """
         user_agent = "SearchAPI/1.0"
 
         try:
             # 优先尝试中文 Wikipedia
-            wiki_zh = wikipediaapi.Wikipedia(user_agent=user_agent, language="zh")
-            page = wiki_zh.page(query)
-            if page.exists():
-                return WikipediaResult(
-                    title=page.title,
-                    summary=page.summary[:500] + "..." if len(page.summary) > 500 else page.summary,
-                    url=page.fullurl,
-                    source="wikipedia (zh)",
-                )
+            zh_titles = cls._wikipedia_search_titles(query, lang="zh")
+            if zh_titles:
+                wiki_zh = wikipediaapi.Wikipedia(user_agent=user_agent, language="zh")
+                for title in zh_titles:
+                    page = wiki_zh.page(title)
+                    if page.exists():
+                        return WikipediaResult(
+                            title=page.title,
+                            summary=page.summary[:500] + "..." if len(page.summary) > 500 else page.summary,
+                            url=page.fullurl,
+                            source="wikipedia (zh)",
+                        )
 
             # 回退到英文 Wikipedia
-            wiki_en = wikipediaapi.Wikipedia(user_agent=user_agent, language="en")
-            page_en = wiki_en.page(query)
-            if page_en.exists():
-                return WikipediaResult(
-                    title=page_en.title,
-                    summary=page_en.summary[:500] + "..." if len(page_en.summary) > 500 else page_en.summary,
-                    url=page_en.fullurl,
-                    source="wikipedia (en)",
-                )
+            en_titles = cls._wikipedia_search_titles(query, lang="en")
+            if en_titles:
+                wiki_en = wikipediaapi.Wikipedia(user_agent=user_agent, language="en")
+                for title in en_titles:
+                    page = wiki_en.page(title)
+                    if page.exists():
+                        return WikipediaResult(
+                            title=page.title,
+                            summary=page.summary[:500] + "..." if len(page.summary) > 500 else page.summary,
+                            url=page.fullurl,
+                            source="wikipedia (en)",
+                        )
         except Exception as e:
             logger.error(f"Wikipedia 获取失败: {e}")
         return None
