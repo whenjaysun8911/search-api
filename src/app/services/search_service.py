@@ -434,10 +434,12 @@ class SearchService:
     @classmethod
     def _try_searxng_instance(cls, instance_url: str, query: str, count: int) -> list[SearchResultItem]:
         """
-        同步尝试单个 SearXNG 实例（JSON -> HTML 回退）
+        同步尝试单个 SearXNG 实例
         
-        使用 POST 方式提交搜索（SearXNG 表单默认使用 POST，
-        很多实例 GET 请求会直接返回首页而非搜索结果）
+        流程：
+        1. 使用 Session 先访问首页获取 cookies（大多数实例需要 session cookie 才能搜索）
+        2. POST 搜索请求（带 format=json 优先获取 JSON）
+        3. JSON 失败则 POST 获取 HTML 并解析
         
         返回结果列表（成功）或抛出异常：
         - _RateLimitError: 被限速 (429/403)
@@ -446,14 +448,23 @@ class SearchService:
         base_url = instance_url.rstrip("/")
         search_url = f"{base_url}/search"
 
+        # 使用 Session 保持 cookies
+        session = requests.Session()
+        session.headers.update(cls._SEARXNG_HEADERS)
+        session.verify = False
+
+        # 第 0 步：访问首页建立会话（获取 session cookies）
+        try:
+            session.get(base_url, timeout=5)
+        except requests.exceptions.RequestException:
+            pass  # 首页访问失败也不阻塞，继续尝试搜索
+
         # 情况 A: 优先尝试 JSON API（POST + format=json）
         try:
-            resp = requests.post(
+            resp = session.post(
                 search_url,
                 data={"q": query, "categories": "general", "format": "json"},
-                headers=cls._SEARXNG_HEADERS,
                 timeout=8,
-                verify=False,
             )
             if resp.status_code == 200:
                 try:
@@ -479,38 +490,55 @@ class SearchService:
             raise
         except requests.exceptions.Timeout:
             logger.warning(f"SearXNG 实例 {instance_url} JSON 请求超时")
-            # 不直接失败，继续尝试 HTML（部分实例禁用 JSON 但 HTML 可用）
         except requests.exceptions.RequestException as e:
             logger.warning(f"SearXNG 实例 {instance_url} JSON 请求失败: {e}")
 
-        # 情况 B: HTML 回退（POST 不带 format 参数）
+        # 情况 B: HTML 搜索（POST 不带 format 参数）
         try:
-            html_headers = {**cls._SEARXNG_HEADERS, "Referer": f"{base_url}/"}
-            resp = requests.post(
+            resp = session.post(
                 search_url,
                 data={"q": query, "categories": "general"},
-                headers=html_headers,
                 timeout=8,
-                verify=False,
             )
             if resp.status_code == 200:
                 results = cls._parse_searxng_html(resp.text)
                 if results:
-                    logger.warning(f"SearXNG 实例 {instance_url} HTML 搜索成功 ({len(results)} 条结果)")
+                    logger.warning(f"SearXNG 实例 {instance_url} HTML(POST) 搜索成功 ({len(results)} 条结果)")
                     return results[:count]
-                else:
-                    logger.warning(f"SearXNG 实例 {instance_url} HTML 返回空结果")
+
             elif resp.status_code in (429, 403):
-                logger.warning(f"SearXNG 实例 {instance_url} HTML 被限速: {resp.status_code}")
+                logger.warning(f"SearXNG 实例 {instance_url} HTML(POST) 被限速: {resp.status_code}")
                 raise _RateLimitError(instance_url)
-            else:
-                logger.warning(f"SearXNG 实例 {instance_url} HTML 响应异常: {resp.status_code}")
         except _RateLimitError:
             raise
         except requests.exceptions.Timeout:
-            logger.warning(f"SearXNG 实例 {instance_url} HTML 请求超时")
+            logger.warning(f"SearXNG 实例 {instance_url} HTML(POST) 请求超时")
         except requests.exceptions.RequestException as e:
-            logger.warning(f"SearXNG 实例 {instance_url} HTML 请求失败: {e}")
+            logger.warning(f"SearXNG 实例 {instance_url} HTML(POST) 请求失败: {e}")
+
+        # 情况 C: GET 方式搜索（部分实例只支持 GET）
+        try:
+            resp = session.get(
+                search_url,
+                params={"q": query, "categories": "general"},
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                results = cls._parse_searxng_html(resp.text)
+                if results:
+                    logger.warning(f"SearXNG 实例 {instance_url} HTML(GET) 搜索成功 ({len(results)} 条结果)")
+                    return results[:count]
+                else:
+                    logger.warning(f"SearXNG 实例 {instance_url} 所有方式均返回空结果")
+            elif resp.status_code in (429, 403):
+                logger.warning(f"SearXNG 实例 {instance_url} HTML(GET) 被限速: {resp.status_code}")
+                raise _RateLimitError(instance_url)
+        except _RateLimitError:
+            raise
+        except requests.exceptions.Timeout:
+            logger.warning(f"SearXNG 实例 {instance_url} HTML(GET) 请求超时")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"SearXNG 实例 {instance_url} HTML(GET) 请求失败: {e}")
 
         # JSON + HTML 都未成功
         raise _InstanceFailedError(instance_url)
