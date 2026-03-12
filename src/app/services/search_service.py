@@ -341,28 +341,83 @@ class SearchService:
     def _parse_searxng_html(cls, html: str) -> list[SearchResultItem]:
         """
         从 SearXNG HTML 响应中提取搜索结果
+        
+        支持多种 SearXNG 主题的 HTML 结构：
+        - Simple 主题: <a href="url" class="url_header"><h3>title</h3></a>
+        - Oscar 主题: <h3><a href="url">title</a></h3>
+        - 使用 <article> 或 <div> 作为结果容器
         """
         results = []
-        # 正则提取 <article class="result ...">...</article>
-        articles = re.findall(r'<article[^>]+class="[^"]*result[^"]*"[^>]*>(.*?)</article>', html, re.DOTALL)
-        for art in articles:
-            # 提取 URL 和 title: <h3><a href="...">title</a></h3>
-            m_title = re.search(r'<h3[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', art, re.DOTALL)
-            # 提取摘要: <p class="content">...</p>
-            m_snippet = re.search(r'<p[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</p>', art, re.DOTALL)
-            if m_title:
-                url = m_title.group(1).strip()
-                # 过滤 HTML 标签
-                title = re.sub(r'<[^>]+>', '', m_title.group(2)).strip()
-                description = re.sub(r'<[^>]+>', '', m_snippet.group(1)).strip() if m_snippet else ""
-                results.append(
-                    SearchResultItem(
-                        title=title,
-                        url=url,
-                        description=description,
-                        source="searxng (html)"
-                    )
+
+        # 第一步：提取结果块（同时支持 <article> 和 <div class="result"> 容器）
+        blocks = re.findall(
+            r'<(?:article|div)[^>]+class="[^"]*result[^"]*"[^>]*>(.*?)</(?:article|div)>',
+            html, re.DOTALL
+        )
+
+        for block in blocks:
+            url = None
+            title = None
+
+            # 模式 A（现代 Simple 主题）: <a href="url" ...><h3>title</h3></a>
+            m = re.search(
+                r'<a[^>]*href="([^"]+)"[^>]*>\s*<h[34][^>]*>(.*?)</h[34]>\s*</a>',
+                block, re.DOTALL
+            )
+            if m:
+                url = m.group(1).strip()
+                title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+
+            # 模式 B（旧版 Oscar 主题）: <h3><a href="url">title</a></h3>
+            if not url:
+                m = re.search(
+                    r'<h[34][^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>\s*</h[34]>',
+                    block, re.DOTALL
                 )
+                if m:
+                    url = m.group(1).strip()
+                    title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+
+            # 模式 C（通用回退）: 结果块中第一个带 href 的 <a> 标签
+            if not url:
+                m_link = re.search(r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', block, re.DOTALL)
+                if m_link:
+                    url = m_link.group(1).strip()
+                    title = re.sub(r'<[^>]+>', '', m_link.group(2)).strip()
+
+            if not url:
+                continue
+
+            # 提取摘要: <p class="content">...</p> 或其他常见摘要容器
+            description = ""
+            m_snippet = re.search(
+                r'<p[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</p>',
+                block, re.DOTALL
+            )
+            if not m_snippet:
+                # 部分主题使用 <span class="content"> 或 <div class="content">
+                m_snippet = re.search(
+                    r'<(?:span|div)[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</(?:span|div)>',
+                    block, re.DOTALL
+                )
+            if m_snippet:
+                description = re.sub(r'<[^>]+>', '', m_snippet.group(1)).strip()
+
+            results.append(
+                SearchResultItem(
+                    title=title or url,
+                    url=url,
+                    description=description,
+                    source="searxng (html)"
+                )
+            )
+
+        # 诊断日志：解析失败时输出 HTML 片段以便排查
+        if not results and html:
+            # 截取前 500 字符帮助分析页面结构
+            snippet = html[:500].replace('\n', ' ').replace('\r', '')
+            logger.warning(f"SearXNG HTML 解析结果为空，页面片段: {snippet}")
+
         return results
 
     # 模拟浏览器的请求头，用于 SearXNG 请求
