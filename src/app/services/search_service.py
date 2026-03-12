@@ -49,8 +49,6 @@ class SearchService:
     _searxng_cooldowns: dict[str, float] = {}
     # 曾成功返回结果的实例列表，优先级最高
     _searxng_successful: list[str] = []
-    # 缓存的 rnet Client 实例，避免重复创建
-    _rnet_client = None
     # 常规请求间隔（秒），避免同一实例被频繁调用
     _SEARXNG_MIN_INTERVAL = 3.0
     # 被限速后的惩罚冷却时间（秒）
@@ -363,142 +361,134 @@ class SearchService:
                 )
         return results
 
+    # 模拟浏览器的请求头，用于 SearXNG 请求
+    _SEARXNG_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
     @classmethod
-    def _get_rnet_client(cls):
+    def _try_searxng_instance(cls, instance_url: str, query: str, count: int) -> list[SearchResultItem]:
         """
-        获取或创建缓存的 rnet Client 实例，超时 8 秒
+        同步尝试单个 SearXNG 实例（JSON -> HTML 回退）
+        
+        返回结果列表（成功）或抛出异常：
+        - _RateLimitError: 被限速 (429/403)
+        - _InstanceFailedError: 实例不可用（含超时、连接失败等）
         """
-        if cls._rnet_client is None:
-            from rnet import Client, Impersonate
-            cls._rnet_client = Client(impersonate=Impersonate.Chrome137, verify=False, timeout=8)
-        return cls._rnet_client
+        base_url = instance_url.rstrip("/")
+
+        # 情况 A: 优先尝试 JSON API
+        json_url = f"{base_url}/search?q={urllib.parse.quote(query)}&format=json"
+        try:
+            resp = requests.get(json_url, headers=cls._SEARXNG_HEADERS, timeout=8, verify=False)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    results = data.get("results", [])
+                    if results:
+                        logger.info(f"SearXNG 实例 {instance_url} JSON 搜索成功 ({len(results)} 条结果)")
+                        return [
+                            SearchResultItem(
+                                title=r.get("title"),
+                                url=r.get("url"),
+                                description=r.get("content") or r.get("snippet"),
+                                source=f"searxng ({r.get('engine', 'unknown')})",
+                            )
+                            for r in results[:count]
+                        ]
+                except (ValueError, KeyError):
+                    logger.debug(f"SearXNG 实例 {instance_url} JSON 解析失败，尝试 HTML")
+            elif resp.status_code in (429, 403):
+                logger.info(f"SearXNG 实例 {instance_url} JSON 被限速: {resp.status_code}")
+                raise _RateLimitError(instance_url)
+        except _RateLimitError:
+            raise
+        except requests.exceptions.Timeout:
+            logger.info(f"SearXNG 实例 {instance_url} JSON 请求超时")
+            # 不直接失败，继续尝试 HTML（部分实例禁用 JSON 但 HTML 可用）
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"SearXNG 实例 {instance_url} JSON 请求失败: {e}")
+
+        # 情况 B: HTML 回退
+        html_url = f"{base_url}/search?q={urllib.parse.quote(query)}&categories=general"
+        try:
+            html_headers = {**cls._SEARXNG_HEADERS, "Referer": f"{base_url}/"}
+            resp = requests.get(html_url, headers=html_headers, timeout=8, verify=False)
+            if resp.status_code == 200:
+                results = cls._parse_searxng_html(resp.text)
+                if results:
+                    logger.info(f"SearXNG 实例 {instance_url} HTML 搜索成功 ({len(results)} 条结果)")
+                    return results[:count]
+                else:
+                    logger.debug(f"SearXNG 实例 {instance_url} HTML 返回空结果")
+            elif resp.status_code in (429, 403):
+                logger.info(f"SearXNG 实例 {instance_url} HTML 被限速: {resp.status_code}")
+                raise _RateLimitError(instance_url)
+            else:
+                logger.debug(f"SearXNG 实例 {instance_url} HTML 响应异常: {resp.status_code}")
+        except _RateLimitError:
+            raise
+        except requests.exceptions.Timeout:
+            logger.info(f"SearXNG 实例 {instance_url} HTML 请求超时")
+        except requests.exceptions.RequestException as e:
+            logger.info(f"SearXNG 实例 {instance_url} HTML 请求失败: {e}")
+
+        # JSON + HTML 都未成功
+        raise _InstanceFailedError(instance_url)
 
     @classmethod
     def search_searxng(cls, query: str, count: int = 5) -> list[SearchResultItem]:
         """
-        使用 SearXNG 公共实例搜索
+        使用 SearXNG 公共实例搜索（同步并发模式）
         
-        核心策略：并发探测 + 快速返回
-        - 每轮同时向 N 个实例发起请求
-        - 使用 FIRST_COMPLETED 模式，任一成功立即返回并取消剩余任务
-        - 最多进行 4 轮（共覆盖 ~20 个实例）
+        核心策略：
+        - 使用 ThreadPoolExecutor 并发探测多个实例
+        - 通过 as_completed 实现快速返回：任一实例成功即返回结果
+        - 最多进行 4 轮（每轮 5 个实例，共覆盖 ~20 个实例）
         - 成功实例被记住，下次优先使用
-        - 被限速的实例施加 5 分钟冷却，超时/不可用的实例直接移除
+        - 被限速的实例施加 5 分钟冷却，不可用的实例直接移除
         """
-        import asyncio
+        max_rounds = 4
 
-        async def _try_instance(client, instance_url: str, q: str, cnt: int):
-            """
-            尝试单个实例的 JSON -> HTML 搜索流程
-            
-            保证只抛出以下三种结果之一：
-            - 返回 (instance_url, results) 表示成功
-            - 抛出 _RateLimitError 表示被限速
-            - 抛出 _InstanceFailedError 表示不可用（含超时）
-            """
-            try:
-                base_url = instance_url.rstrip("/")
+        for round_idx in range(max_rounds):
+            batch = cls._pick_searxng_batch()
+            if not batch:
+                logger.error("SearXNG 无可用候选实例")
+                return []
 
-                # 尝试 JSON API
-                json_url = f"{base_url}/search?q={urllib.parse.quote(q)}&format=json"
-                try:
-                    response = await client.get(url=json_url)
-                    status = response.status_code.as_int()
-                    if status == 200:
-                        try:
-                            data = await response.json()
-                            results = data.get("results", [])
-                            if results:
-                                return (instance_url, [
-                                    SearchResultItem(
-                                        title=r.get("title"),
-                                        url=r.get("url"),
-                                        description=r.get("content") or r.get("snippet"),
-                                        source=f"searxng ({r.get('engine', 'unknown')})",
-                                    )
-                                    for r in results[:cnt]
-                                ])
-                        except Exception:
-                            pass  # JSON 解析失败，继续尝试 HTML
-                    elif status in (429, 403):
-                        raise _RateLimitError(instance_url)
-                except _RateLimitError:
-                    raise
-                except Exception:
-                    pass  # JSON 请求失败（含超时），继续尝试 HTML
+            logger.info(f"SearXNG 第 {round_idx + 1} 轮并发探测 ({len(batch)} 个实例)")
 
-                # 尝试 HTML 解析
-                html_url = f"{base_url}/search?q={urllib.parse.quote(q)}&categories=general"
-                headers = {
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Referer": f"{base_url}/",
-                }
-                response = await client.get(url=html_url, headers=headers)
-                status = response.status_code.as_int()
-                if status in (429, 403):
-                    raise _RateLimitError(instance_url)
-                if status == 200:
-                    html_content = await response.text()
-                    results = cls._parse_searxng_html(html_content)
-                    if results:
-                        return (instance_url, results[:cnt])
-
-                # JSON + HTML 都无有效结果
-                raise _InstanceFailedError(instance_url)
-
-            except (_RateLimitError, _InstanceFailedError):
-                raise
-            except Exception:
-                # 任何未预期的异常（超时、连接失败等）统一视为实例不可用
-                raise _InstanceFailedError(instance_url)
-
-        async def _do_search():
-            client = cls._get_rnet_client()
-            max_rounds = 4  # 最多 4 轮并发探测
-
-            for round_idx in range(max_rounds):
-                batch = cls._pick_searxng_batch()
-                if not batch:
-                    logger.error("SearXNG 无可用候选实例")
-                    return []
-
-                logger.debug(f"SearXNG 第 {round_idx + 1} 轮并发探测 ({len(batch)} 个实例): {batch}")
-                pending = {
-                    asyncio.create_task(_try_instance(client, inst, query, count))
+            # 使用线程池并发请求多个实例
+            with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                future_to_inst = {
+                    executor.submit(cls._try_searxng_instance, inst, query, count): inst
                     for inst in batch
                 }
 
-                # FIRST_COMPLETED 循环：一有结果就检查，成功则立即返回
-                result = None
-                while pending:
-                    done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                    for task in done:
-                        try:
-                            inst_url, items = task.result()
-                            logger.info(f"SearXNG 实例 {inst_url} 搜索成功")
-                            cls._mark_searxng_success(inst_url)
-                            result = items
-                        except _RateLimitError as e:
-                            cls._penalize_searxng_instance(e.instance_url)
-                        except _InstanceFailedError as e:
-                            cls._remove_searxng_instance(e.instance_url)
+                # as_completed: 谁先完成就先处理谁
+                for future in as_completed(future_to_inst):
+                    inst_url = future_to_inst[future]
+                    try:
+                        results = future.result()
+                        # 成功拿到结果，记录并返回
+                        cls._mark_searxng_success(inst_url)
+                        return results
+                    except _RateLimitError:
+                        cls._penalize_searxng_instance(inst_url)
+                    except _InstanceFailedError:
+                        cls._remove_searxng_instance(inst_url)
+                    except Exception as e:
+                        logger.warning(f"SearXNG 实例 {inst_url} 未知异常: {e}")
+                        cls._remove_searxng_instance(inst_url)
 
-                    # 拿到成功结果后取消剩余任务并返回
-                    if result is not None:
-                        for t in pending:
-                            t.cancel()
-                        return result
-
-            logger.error(f"SearXNG 搜索失败: {max_rounds} 轮并发探测均未成功")
-            return []
-
-        # 由于在多线程中执行，直接运行 asyncio.run 包装异步请求
-        try:
-            return asyncio.run(_do_search())
-        except Exception as e:
-            logger.error(f"SearXNG 异步执行失败: {e}")
-            return []
+        logger.error(f"SearXNG 搜索失败: {max_rounds} 轮并发探测均未成功")
+        return []
 
     @staticmethod
     def _wikipedia_search_titles(query: str, lang: str = "en", limit: int = 3) -> list[str]:
