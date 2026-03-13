@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     serper_api_key: str = ""
 
+    # 自建 SearXNG 实例地址
+    searxng_base_url: str = "http://localhost:55088"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
