@@ -434,89 +434,97 @@ class SearchService:
     @classmethod
     def _try_searxng_instance(cls, instance_url: str, query: str, count: int) -> list[SearchResultItem]:
         """
-        使用 rnet（Chrome TLS 指纹模拟）尝试单个 SearXNG 实例
+        同步尝试单个 SearXNG 实例
         
         关键设计：
-        - 每次调用创建独立的 asyncio 事件循环和 rnet.Client（避免跨循环复用问题）
-        - rnet 模拟 Chrome 的 TLS 指纹（JA3/JA4），绕过 bot 检测
-        - 使用 POST 提交搜索表单（form=...），避免 GET 请求被实例重定向 (302) 或返回首页
+        - 使用 requests.Session() 维持由反爬策略（如 Cloudflare）下发的 Cookies
+        - 使用 GET 请求（测试表明 PUBLIC 实例对 POST 请求的机器人检测极严，总是返回 302 首页）
+        - 带上伪造的浏览器 User-Agent 和 Accept 头
+        
+        返回结果列表（成功）或抛出异常：
+        - _RateLimitError: 被限速 (429/403)
+        - _InstanceFailedError: 实例不可用（含超时、连接失败等）
         """
-        import asyncio
-        from rnet import Client, Impersonate
-
-        async def _do_request():
-            # 每次调用创建独立的 Client，绑定当前事件循环
-            client = Client(impersonate=Impersonate.Chrome136, verify=False, timeout=8)
-            base_url = instance_url.rstrip("/")
-            search_url = f"{base_url}/search"
-
-            # 情况 A: 优先尝试 JSON API（POST + format=json）
-            try:
-                # rnet 需要 form 为 list of tuples 才能正确发送 x-www-form-urlencoded
-                json_payload = [("q", query), ("categories", "general"), ("format", "json")]
-                response = await client.post(url=search_url, form=json_payload)
-                status = response.status_code.as_int()
-                
-                if status == 200:
-                    try:
-                        data = await response.json()
-                        results = data.get("results", [])
-                        if results:
-                            logger.warning(f"SearXNG 实例 {instance_url} JSON 搜索成功 ({len(results)} 条结果)")
-                            return [
-                                SearchResultItem(
-                                    title=r.get("title"),
-                                    url=r.get("url"),
-                                    description=r.get("content") or r.get("snippet"),
-                                    source=f"searxng ({r.get('engine', 'unknown')})",
-                                )
-                                for r in results[:count]
-                            ]
-                    except Exception:
-                        logger.warning(f"SearXNG 实例 {instance_url} JSON 解析失败，尝试 HTML")
-                elif status in (429, 403):
-                    logger.warning(f"SearXNG 实例 {instance_url} JSON 被限速: {status}")
-                    raise _RateLimitError(instance_url)
-            except _RateLimitError:
-                raise
-            except Exception as e:
-                logger.warning(f"SearXNG 实例 {instance_url} JSON 请求异常: {e}")
-
-            # 情况 B: HTML 搜索（POST 不带 format 参数）
-            try:
-                html_payload = [("q", query), ("categories", "general")]
-                response = await client.post(url=search_url, form=html_payload)
-                status = response.status_code.as_int()
-                
-                if status == 200:
-                    html_content = await response.text()
-                    results = cls._parse_searxng_html(html_content)
-                    if results:
-                        logger.warning(f"SearXNG 实例 {instance_url} HTML 搜索成功 ({len(results)} 条结果)")
-                        return results[:count]
-                    else:
-                        logger.warning(f"SearXNG 实例 {instance_url} 所有方式均返回空结果")
-                elif status in (429, 403):
-                    logger.warning(f"SearXNG 实例 {instance_url} HTML 被限速: {status}")
-                    raise _RateLimitError(instance_url)
-                else:
-                    logger.warning(f"SearXNG 实例 {instance_url} HTML 响应异常: {status}")
-            except _RateLimitError:
-                raise
-            except Exception as e:
-                logger.warning(f"SearXNG 实例 {instance_url} HTML 请求异常: {e}")
-
-            # JSON + HTML 均未成功
-            raise _InstanceFailedError(instance_url)
-
-        # 每个线程独立运行事件循环，确保 rnet.Client 生命周期正确
+        base_url = instance_url.rstrip("/")
+        
+        session = requests.Session()
+        session.headers.update(cls._SEARXNG_HEADERS)
+        
+        # 禁用警告
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        # 可选：先访问首页获取可能的初始 Cookie 
         try:
-            return asyncio.run(_do_request())
-        except (_RateLimitError, _InstanceFailedError):
+            session.get(base_url, timeout=5, verify=False)
+        except requests.exceptions.RequestException:
+            pass
+
+        # 情况 A: 优先尝试 JSON API（GET + format=json）
+        json_url = f"{base_url}/search?q={urllib.parse.quote(query)}&format=json&categories=general"
+        try:
+            resp = session.get(json_url, timeout=8, verify=False)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    results = data.get("results", [])
+                    if results:
+                        logger.warning(f"SearXNG 实例 {instance_url} JSON 搜索成功 ({len(results)} 条结果)")
+                        return [
+                            SearchResultItem(
+                                title=r.get("title"),
+                                url=r.get("url"),
+                                description=r.get("content") or r.get("snippet"),
+                                source=f"searxng ({r.get('engine', 'unknown')})",
+                            )
+                            for r in results[:count]
+                        ]
+                except (ValueError, KeyError):
+                    logger.warning(f"SearXNG 实例 {instance_url} JSON 解析失败，尝试 HTML")
+            elif resp.status_code in (429, 403):
+                logger.warning(f"SearXNG 实例 {instance_url} JSON 被限速: {resp.status_code}")
+                raise _RateLimitError(instance_url)
+            elif resp.status_code in (302, 301):
+                logger.warning(f"SearXNG 实例 {instance_url} JSON 响应重定向: {resp.status_code}")
+        except _RateLimitError:
             raise
-        except Exception as e:
-            logger.warning(f"SearXNG 实例 {instance_url} 事件循环异常: {e}")
-            raise _InstanceFailedError(instance_url)
+        except requests.exceptions.Timeout:
+            logger.warning(f"SearXNG 实例 {instance_url} JSON 请求超时")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"SearXNG 实例 {instance_url} JSON 请求失败: {e}")
+
+        # 情况 B: HTML 搜索（GET 不带 format 参数）
+        html_url = f"{base_url}/search?q={urllib.parse.quote(query)}&categories=general"
+        try:
+            # 增加 Referer 提高真实度
+            session.headers.update({"Referer": f"{base_url}/"})
+            resp = session.get(html_url, timeout=8, verify=False)
+            
+            if resp.status_code == 200:
+                results = cls._parse_searxng_html(resp.text)
+                if results:
+                    logger.warning(f"SearXNG 实例 {instance_url} HTML 搜索成功 ({len(results)} 条结果)")
+                    return results[:count]
+                else:
+                    # 如果匹配不到，可能是遇到了反爬页
+                    if "not a bot" in resp.text.lower() or "challenge" in resp.text.lower():
+                        logger.warning(f"SearXNG 实例 {instance_url} 被反爬虫拦截 (Bot Challenge)")
+                    else:
+                        logger.warning(f"SearXNG 实例 {instance_url} HTML 返回空结果")
+            elif resp.status_code in (429, 403):
+                logger.warning(f"SearXNG 实例 {instance_url} HTML 被限速: {resp.status_code}")
+                raise _RateLimitError(instance_url)
+            else:
+                logger.warning(f"SearXNG 实例 {instance_url} HTML 响应异常: {resp.status_code}")
+        except _RateLimitError:
+            raise
+        except requests.exceptions.Timeout:
+            logger.warning(f"SearXNG 实例 {instance_url} HTML 请求超时")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"SearXNG 实例 {instance_url} HTML 请求失败: {e}")
+
+        # JSON + HTML 都未成功
+        raise _InstanceFailedError(instance_url)
 
     @classmethod
     def search_searxng(cls, query: str, count: int = 5) -> list[SearchResultItem]:
