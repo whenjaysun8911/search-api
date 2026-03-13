@@ -151,11 +151,24 @@ class SearchService:
             logger.error(f"DuckDuckGo Search 失败: {e}")
         return []
 
-    @staticmethod
-    def search_searxng(query: str, count: int = 5) -> list[SearchResultItem]:
+    # Brave freshness 参数到 SearXNG time_range 参数的映射
+    _FRESHNESS_TO_TIME_RANGE = {
+        "pd": "day",     # 过去 24 小时
+        "pw": "week",    # 过去一周
+        "pm": "month",   # 过去一月
+        "py": "year",    # 过去一年
+    }
+
+    @classmethod
+    def search_searxng(cls, query: str, count: int = 5, freshness: str = "") -> list[SearchResultItem]:
         """
         使用自建 SearXNG 实例搜索
         直接请求本地部署的 SearXNG JSON API，无需爬取公共实例
+
+        Args:
+            query: 搜索关键词
+            count: 返回结果数量
+            freshness: 时间过滤 (pd=24小时, pw=一周, pm=一月, py=一年, 空=不限制)
         """
         base_url = settings.searxng_base_url.rstrip("/")
         search_url = (
@@ -164,6 +177,10 @@ class SearchService:
             f"&format=json"
             f"&categories=general"
         )
+        # 将 Brave 格式的 freshness 映射为 SearXNG 的 time_range
+        time_range = cls._FRESHNESS_TO_TIME_RANGE.get(freshness)
+        if time_range:
+            search_url += f"&time_range={time_range}"
 
         try:
             req = urllib.request.Request(search_url)
@@ -313,7 +330,7 @@ class SearchService:
         if "wikipedia" in sources:
             search_tasks["wikipedia"] = (cls.get_wikipedia_summary, (query,))
         if "searxng" in sources:
-            search_tasks["searxng"] = (cls.search_searxng, (query, count))
+            search_tasks["searxng"] = (cls.search_searxng, (query, count, freshness))
 
         # 使用线程池并发执行搜索任务
         with ThreadPoolExecutor(max_workers=len(search_tasks) or 1) as executor:
