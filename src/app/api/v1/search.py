@@ -22,7 +22,7 @@ async def multi_search(request: SearchRequest):
     - **serper**: Google 搜索结果（需配置 SERPER_API_KEY）
     - **duckduckgo**: DuckDuckGo 搜索（无需 API key）
     - **wikipedia**: Wikipedia 摘要（无需 API key）
-    - **searxng**: SearXNG 公共实例聚合搜索（无需 API key）
+    - **searxng**: SearXNG 自建实例聚合搜索（无需 API key）
     """
     result = SearchService.multi_search(
         query=request.query,
@@ -45,8 +45,8 @@ async def search_get(
     
     Args:
         query: 搜索关键词
-        count: 每个搜索引擎返回的结果数量（1-20）
-        freshness: 内容新鲜度过滤(仅Brave): pd=24小时, pw=一周, pm=一月, 空=不限制
+        count: 每个搜索引擎返回的结果数量（1-100）
+        freshness: 内容新鲜度过滤(Brave/SearXNG): pd=24小时, pw=一周, pm=一月, py=一年, 空=不限制
         sources: 逗号分隔的搜索源列表，如 "brave,tavily,duckduckgo"
     """
     # 处理 sources 参数
@@ -56,7 +56,7 @@ async def search_get(
 
     result = SearchService.multi_search(
         query=query,
-        count=min(max(count, 1), 20),  # 限制范围1-20
+        count=min(max(count, 1), 100),  # 限制范围1-100
         freshness=freshness,
         sources=source_list,
     )
