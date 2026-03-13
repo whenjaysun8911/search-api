@@ -177,6 +177,8 @@ class SearchService:
                             title=r.get("title"),
                             url=r.get("url"),
                             description=r.get("content") or r.get("snippet"),
+                            # SearXNG 的聚合评分，多引擎命中的结果分数更高
+                            score=r.get("score"),
                             # 合并来源引擎列表，如 "duckduckgo / brave / google"
                             source=f"searxng ({' / '.join(r.get('engines', ['unknown']))})",
                         )
