@@ -9,7 +9,7 @@ class SearchRequest(BaseModel):
     """搜索请求参数"""
 
     query: str = Field(..., description="搜索关键词")
-    count: int = Field(default=5, ge=1, le=20, description="每个搜索引擎返回的结果数量")
+    count: int = Field(default=5, ge=1, le=100, description="每个搜索引擎返回的结果数量")
     freshness: str = Field(default="", description="内容新鲜度过滤(仅Brave支持): pd=过去24小时, pw=过去一周, pm=过去一月, 空=不限制")
     sources: list[str] | None = Field(
         default=None,
